@@ -282,9 +282,9 @@ class StreetViewImageCollector:
     self,
     lat: float,
     lon: float,
-    pitch:float,
     heading: float,
     output_dir: str,
+    pitch:float = None,
     filename: str = "single_view.jpg"
 ) -> dict:
         """
@@ -308,6 +308,8 @@ class StreetViewImageCollector:
         dict
             Metadata of the collected view.
         """
+        if pitch is None:
+            pitch = self.pitch
         os.makedirs(output_dir, exist_ok=True)
 
         url = f"https://maps.googleapis.com/maps/api/streetview?size={self.size[0]}x{self.size[1]}&location={lat},{lon}&heading={heading}&pitch={pitch}&fov={self.fov}&key={self.api_key}"

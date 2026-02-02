@@ -5,6 +5,9 @@ import numpy as np
 from ultralytics import YOLO
 import matplotlib.pyplot as plt
 import requests
+import os
+import cv2
+from PIL import Image, ImageOps
 
 
 class GVIFeatureExtractor(StreetViewFeatureExtractor):
@@ -30,12 +33,13 @@ class GVIFeatureExtractor(StreetViewFeatureExtractor):
     
 
     def download_model(
-        self, 
-        save_path = "facades_model.pt"
-        )->None:
-
+        self,
+        save_path = "facades_model.pt",
+        verbose: bool = True
+    )->None:
+    
         """
-        Downloads the façade characteristics model, which includes the vegetation class. Note that the
+        Downloads the façade characteristics model. Note that the
         model works best with views directed towards building façades or sidewalk views. The results of the segmentation 
         will return also the confidence of the detections. 
 
@@ -45,29 +49,64 @@ class GVIFeatureExtractor(StreetViewFeatureExtractor):
             Path where the .pt file will be downloaded.
         """
         #Non-failure case
-        URL = "https://huggingface.co/urilp4669/Facade_Segmentator/resolve/main/facades.pt"
-
-        response = requests.get(URL, stream=True)
-        if response.status_code == 200:
-            with open(save_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+        
+        URL = "https://huggingface.co/walup/facades_segmentation/resolve/main/weights.pt"
+        #We will only download if the model is not already present
+        
+        if not os.path.exists(save_path):
+            response = requests.get(URL, stream=True)
+            if response.status_code == 200:
+                with open(save_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            else:
+                raise Exception("Failed to download the model.")
             print("Model downloaded.")
-
-            self.model_path = save_path
-            self.vegetation_class_id = 11
             self.model = YOLO(save_path)
+            self.model_path = save_path
+
+            self.facade_feature_id_dictionary = {
+            name: idx for idx, name in self.model.names.items()
+            }
+            self.vegetation_class_id = self.facade_feature_id_dictionary.get("vegetation", None)
+            if verbose:
+                print("Vegetation class ID:", self.vegetation_class_id)
         else:
-            raise Exception("Failed to download the model.")
+            self.model = YOLO(save_path)
+            self.model_path = save_path
+
+            self.facade_feature_id_dictionary = {
+            name: idx for idx, name in self.model.names.items()
+            }
+            self.vegetation_class_id = self.facade_feature_id_dictionary.get("vegetation", None)
+            if verbose:
+                print("Model already exists. Loaded existing model.")
+                print("Vegetation class ID:", self.vegetation_class_id)
+            
 
 
 
-    def preprocess_image(
-        self, 
-        image:np.ndarray
-        )->np.ndarray:
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Ensures the image matches the Roboflow training environment:
+        1. Fixes Orientation (Auto-Orient)
+        2. Ensures RGB color space (Roboflow standard)
+        """
+        # If the input is from OpenCV (BGR), convert to RGB
+        # If it's already RGB, this is still safe to ensure consistency
+        if isinstance(image, np.ndarray):
+            # Assuming input is BGR from cv2.imread or GSV collector
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(image_rgb)
+        else:
+            pil_img = Image.open(image)
 
-        return image
+        # Apply Auto-Orient (Critical for mobile/GSV metadata)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        
+        return np.array(pil_img)
+
+        
     
     def get_masks(
         self,
@@ -99,7 +138,9 @@ class GVIFeatureExtractor(StreetViewFeatureExtractor):
         elif self.method == "ml":
             if self.model is None:
                 raise RuntimeError("Model is not loaded. Cannot extract masks.")
-            results = self.model(image, verbose=False, overlap_mask=True)
+            
+            preprocessed_image = self.preprocess_image(image)
+            results = self.model(preprocessed_image, verbose=False, overlap_mask=True)
 
             masks: List[np.ndarray] = []
             final_confidences: List[float] = []

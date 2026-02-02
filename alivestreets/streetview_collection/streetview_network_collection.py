@@ -27,9 +27,25 @@ class StreetViewNetworkCollector:
             size = size
 
         )
+
+        self.set_mode(mode)
     
 
+    def set_mode(self, mode: Literal["full_panoramics", "sidewalks", "directed"])->None:
+        """
+        Sets the mode of the Street View Network Collector.
 
+        Parameters
+        __________
+
+        mode
+            The mode to set. It must be one of 'full_panoramics', 'sidewalks' or 'directed'.
+        """
+
+        if not mode in ["full_panoramics", "sidewalks", "directed"]:
+            raise Exception("The mode provided is not valid. Please choose between 'full_panoramics', 'sidewalks' or 'directed'.")
+        
+        self.mode = mode
 
     def collect_street_sampler_images(
         self,

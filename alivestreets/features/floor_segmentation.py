@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ultralytics import YOLO
 import requests
+import cv2
+from PIL import Image, ImageOps
 
 class FloorFeatureExtractor(StreetViewFeatureExtractor):
 
@@ -12,13 +14,15 @@ class FloorFeatureExtractor(StreetViewFeatureExtractor):
         method: str = "ml",
         model_path: Optional[str] = None,
         floor_features_dictionary: Optional[dict] = None,
-        threshold: float = 0.3
+        threshold: float = 0.3,
+        iou: float = 0.9
         ) -> None:
         
         self.method: str = method
         self.model_path: Optional[str] = model_path
         self.floor_features_dictionary:Optional[Dict[str,int]] = floor_features_dictionary
         self.threshold: float = threshold
+        self.iou: float = iou
 
         self.model: Optional[YOLO] = None
         if(self.method == "ml" and model_path and floor_features_dictionary is not None):
@@ -49,22 +53,37 @@ class FloorFeatureExtractor(StreetViewFeatureExtractor):
             print("Model downloaded")
             #The default model contains some classes that are not strictly speaking
             #floor features.
+
+            # construct the dictionary
+            
+            self.model = YOLO(save_path)
             floor_dictionary = {
-                "asphalt":0,
-                "built_structure":1,
-                "dust":2,
-                "floor_concrete":3, 
-                "urban_void":4,
-                "vegetation":5
+            name: idx for idx, name in self.model.names.items()
             }
             self.floor_features_dictionary = floor_dictionary
-            self.model = YOLO(save_path)
         else:
             raise Exception("Failed to download the model. Contemplate your life and internet connection.")
 
 
-    def preprocess_image(self, image):
-        return image
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Ensures the image matches the Roboflow training environment:
+        1. Fixes Orientation (Auto-Orient)
+        2. Ensures RGB color space (Roboflow standard)
+        """
+        # If the input is from OpenCV (BGR), convert to RGB
+        # If it's already RGB, this is still safe to ensure consistency
+        if isinstance(image, np.ndarray):
+            # Assuming input is BGR from cv2.imread or GSV collector
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(image_rgb)
+        else:
+            pil_img = Image.open(image)
+
+        # Apply Auto-Orient (Critical for mobile/GSV metadata)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        
+        return np.array(pil_img)
 
     def get_masks(
         self, 
@@ -93,8 +112,8 @@ class FloorFeatureExtractor(StreetViewFeatureExtractor):
                 raise ValueError("Invalid class name or floor feature dictionary not set.")
             if(self.model is None):
                 raise ValueError("Model has not been initialized. If you need a model use the download_model method.")
-
-            results = self.model(image, verbose = False, overlap_mask = True)
+            preprocessed_image = self.preprocess_image(image)
+            results = self.model(preprocessed_image, verbose = False, overlap_mask = True, iou=self.iou)
             requested_id = self.floor_features_dictionary.get(class_name, None)
             masks: List[np.ndarray] = []
             confidences: List[float] = []

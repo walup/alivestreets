@@ -2,11 +2,12 @@ from typing import Optional, List
 import numpy as np
 from ultralytics import YOLO
 from alivestreets.features.street_view_feature import StreetViewFeatureExtractor
-from PIL import Image
+from PIL import Image, ImageOps
 import cv2
 from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import requests
+
 
 
 class Panoramic2FishEye:
@@ -112,7 +113,8 @@ class SVFFeatureExtractor(StreetViewFeatureExtractor):
                 raise RuntimeError(f"Please input a valid model path or download with `download_model` method. Error: {e}")
 
     def get_masks(self, tile: np.ndarray) -> Tuple[List[np.ndarray], List[float]]:
-        results = self.model(tile, verbose=False, overlap_mask=True)
+        preprocessed_tile = self.preprocess_image(tile)
+        results = self.model(preprocessed_tile, verbose=False, overlap_mask=True)
         masks: List[np.ndarray] = []
         confidences: List[float] = []
 
@@ -152,8 +154,73 @@ class SVFFeatureExtractor(StreetViewFeatureExtractor):
             self.sky_class_id = 7
 
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        # No preprocessing needed, return as-is
-        return image
+        """
+        Ensures the image matches the Roboflow training environment:
+        1. Fixes Orientation (Auto-Orient)
+        2. Ensures RGB color space (Roboflow standard)
+        """
+        # If the input is from OpenCV (BGR), convert to RGB
+        # If it's already RGB, this is still safe to ensure consistency
+        if isinstance(image, np.ndarray):
+            # Assuming input is BGR from cv2.imread or GSV collector
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(image_rgb)
+        else:
+            pil_img = Image.open(image)
+
+        # Apply Auto-Orient (Critical for mobile/GSV metadata)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        
+        return np.array(pil_img)
+    
+
+    def get_panoramic_mask(self, image: np.ndarray) -> np.ndarray:
+        """
+        Computes the panoramic sky mask from the input image.
+
+        Parameters
+        ----------
+        image
+            Input image as a numpy array.
+        
+        Returns
+        -------
+        np.ndarray
+            Binary mask of the sky region in the panoramic image.
+        """
+        original_h, original_w = image.shape[:2]
+        num_tiles_x = (original_w + self.tile_size - 1) // self.tile_size
+        num_tiles_y = (original_h + self.tile_size - 1) // self.tile_size
+
+        sky_mask = np.zeros((original_h, original_w), dtype=np.uint8)
+
+        for i in range(num_tiles_y):
+            for j in range(num_tiles_x):
+                x_start = j * self.tile_size
+                y_start = i * self.tile_size
+                x_end = min(x_start + self.tile_size, original_w)
+                y_end = min(y_start + self.tile_size, original_h)
+
+                tile = image[y_start:y_end, x_start:x_end]
+
+                # Pad tile if needed
+                pad_x = self.tile_size - tile.shape[1]
+                pad_y = self.tile_size - tile.shape[0]
+                tile_padded = cv2.copyMakeBorder(tile, 0, pad_y, 0, pad_x, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
+                masks, _ = self.get_masks(tile_padded)
+
+                if masks:
+                    combined_tile_mask = np.maximum.reduce(masks)[:tile.shape[0], :tile.shape[1]]
+                else:
+                    combined_tile_mask = np.zeros((tile.shape[0], tile.shape[1]), dtype=np.uint8)
+
+                sky_mask[y_start:y_end, x_start:x_end] = combined_tile_mask
+        
+        kernel = np.ones((5, 5), np.uint8)
+        sky_mask = cv2.morphologyEx(sky_mask, cv2.MORPH_CLOSE, kernel)
+
+        return sky_mask
 
 
     def compute(self, image: np.ndarray, debug:bool = False) -> dict[str, float]:
