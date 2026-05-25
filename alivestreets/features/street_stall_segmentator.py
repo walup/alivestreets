@@ -146,7 +146,7 @@ class StreetStallSegmentator(StreetViewFeatureExtractor):
             plt.axis("off")
 
             plt.subplot(1, 2, 2)
-            plt.title("Segmented Vegetation")
+            plt.title("Segmented Stall")
             plt.imshow(segmented_image)
             plt.axis("off")
             plt.show()
