@@ -1,12 +1,15 @@
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import os
 
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict, Tuple
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap
 from contextily import add_basemap
+import matplotlib.image as mpimg
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 def plot_trajectory_on_graph(
     G: nx.MultiDiGraph,
@@ -276,3 +279,250 @@ def plot_attribute_time_series(
     ax.grid(True)
     if title:
         ax.set_title(title)
+
+
+def _get_default_streetview_image_path(point_dictionary: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve a representative street-view image path from a collector output dictionary.
+    Priority:
+    1. first element in `view_paths`
+    2. `panoramic_view_path`
+    """
+    view_paths = point_dictionary.get("view_paths")
+    if isinstance(view_paths, list) and len(view_paths) > 0:
+        path = view_paths[0]
+        if isinstance(path, str) and os.path.exists(path):
+            return path
+
+    pano_path = point_dictionary.get("panoramic_view_path")
+    if isinstance(pano_path, str) and os.path.exists(pano_path):
+        return pano_path
+
+    return None
+
+
+def _choose_trajectory_indices(
+    n_nodes: int,
+    max_snapshots: int,
+    include_endpoints: bool
+) -> List[int]:
+    if n_nodes == 0:
+        return []
+    if n_nodes == 1:
+        return [0]
+
+    if include_endpoints:
+        candidates = list(range(n_nodes))
+    else:
+        candidates = list(range(1, max(n_nodes - 1, 1)))
+
+    if len(candidates) <= max_snapshots:
+        return candidates
+
+    idx = np.linspace(0, len(candidates) - 1, num=max_snapshots, dtype=int)
+    return [candidates[i] for i in idx]
+
+
+def plot_trajectory_with_streetview_snapshots(
+    G: nx.Graph,
+    trajectory: List[int],
+    streetview_points: List[Dict[str, Any]],
+    max_snapshots: int = 6,
+    include_endpoints: bool = False,
+    thumbnail_zoom: float = 0.12,
+    connector_color: str = "#333333",
+    connector_alpha: float = 0.75,
+    connector_linewidth: float = 1.0,
+    label_points: bool = True,
+    top_margin_ratio: float = 0.28,
+    save_path: Optional[str] = None,
+    save_dpi: int = 300,
+    image_selector: Optional[Any] = None,
+    ax: Optional[Any] = None,
+    **trajectory_plot_kwargs: Any
+) -> Any:
+    """
+    Plot a trajectory on a map and overlay street-view thumbnails sampled along it.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        Graph containing trajectory nodes with coordinates (`x`, `y`).
+    trajectory : List[int]
+        Node-id sequence defining the trajectory.
+    streetview_points : List[Dict[str, Any]]
+        List of dictionaries (e.g., output from street-view collection) with
+        at least latitude/longitude keys and image paths.
+    max_snapshots : int
+        Maximum number of thumbnails to display.
+    include_endpoints : bool
+        If True, candidate snapshot locations can include start/end nodes.
+    thumbnail_zoom : float
+        Scale factor passed to `OffsetImage`.
+    connector_color : str
+        Line color connecting map location to thumbnail.
+    connector_alpha : float
+        Alpha value for connector lines.
+    connector_linewidth : float
+        Width for connector lines.
+    label_points : bool
+        If True, annotate sampled locations as S1, S2, ...
+    top_margin_ratio : float
+        Additional y-axis margin (relative to map y-range) used to place thumbnails.
+    save_path : Optional[str]
+        If provided, saves the resulting figure to this path.
+    save_dpi : int
+        DPI used when saving the figure.
+    image_selector : Optional[Callable]
+        Optional callable `(point_dictionary) -> Optional[str]` to resolve image path.
+        If omitted, defaults to first `view_paths` item, then `panoramic_view_path`.
+    ax : Optional[Any]
+        Existing matplotlib axis.
+    trajectory_plot_kwargs : Any
+        Extra args forwarded to `plot_trajectory_on_graph`.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axis containing the composed visualization.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 9))
+
+    if not trajectory:
+        return ax
+
+    selector = image_selector if image_selector is not None else _get_default_streetview_image_path
+
+    # Plot the base trajectory first using existing styling logic.
+    plot_trajectory_on_graph(G=G, trajectory=trajectory, ax=ax, **trajectory_plot_kwargs)
+
+    lon_lat_points: List[Tuple[float, float, str]] = []
+    for pt in streetview_points:
+        lat = pt.get("latitude", pt.get("lat"))
+        lon = pt.get("longitude", pt.get("lon"))
+        if lat is None or lon is None:
+            continue
+        image_path = selector(pt)
+        if image_path is None:
+            continue
+        lon_lat_points.append((float(lon), float(lat), image_path))
+
+    if len(lon_lat_points) == 0:
+        return ax
+
+    sampled_indices = _choose_trajectory_indices(
+        n_nodes=len(trajectory),
+        max_snapshots=max_snapshots,
+        include_endpoints=include_endpoints
+    )
+    if len(sampled_indices) == 0:
+        return ax
+
+    # Build map coordinates from graph nodes.
+    graph_pos = {
+        n: (d["x"], d["y"])
+        for n, d in G.nodes(data=True)
+        if "x" in d and "y" in d
+    }
+
+    # Keep coordinate systems consistent with plot_trajectory_on_graph.
+    # If basemap mode reprojects to EPSG:3857, snapshot matching/placement
+    # must use the same projected coordinates.
+    add_basemap_flag = bool(trajectory_plot_kwargs.get("add_basemap", False))
+    crs = trajectory_plot_kwargs.get("crs", "EPSG:4326")
+    should_project = add_basemap_flag and crs != "EPSG:3857"
+    if should_project:
+        from pyproj import Transformer
+        transformer = Transformer.from_crs(crs, "EPSG:3857", always_xy=True)
+        graph_pos = {n: transformer.transform(*xy) for n, xy in graph_pos.items()}
+        lon_lat_points = [
+            (*transformer.transform(lon, lat), image_path)
+            for lon, lat, image_path in lon_lat_points
+        ]
+
+    selected: List[Tuple[int, str]] = []
+    used_paths = set()
+    for idx in sampled_indices:
+        node_id = trajectory[idx]
+        if node_id not in graph_pos:
+            continue
+        x_node, y_node = graph_pos[node_id]
+
+        nearest_path = None
+        nearest_dist = float("inf")
+        for lon, lat, image_path in lon_lat_points:
+            if image_path in used_paths:
+                continue
+            dist = (x_node - lon) ** 2 + (y_node - lat) ** 2
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_path = image_path
+
+        if nearest_path is None:
+            continue
+
+        selected.append((node_id, nearest_path))
+        used_paths.add(nearest_path)
+
+    if len(selected) == 0:
+        return ax
+
+    # Determine where to place thumbnails after the trajectory has set current view limits.
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+    x_span = x_max - x_min if x_max != x_min else 1.0
+    y_span = y_max - y_min if y_max != y_min else 1.0
+
+    thumb_y = y_max + (top_margin_ratio * y_span)
+    thumb_x_positions = np.linspace(
+        x_min + 0.08 * x_span,
+        x_max - 0.08 * x_span,
+        num=len(selected)
+    )
+
+    for i, ((node_id, image_path), thumb_x) in enumerate(zip(selected, thumb_x_positions), start=1):
+        try:
+            image = mpimg.imread(image_path)
+        except Exception:
+            continue
+
+        x_node, y_node = graph_pos[node_id]
+        image_box = OffsetImage(image, zoom=thumbnail_zoom)
+        annotation = AnnotationBbox(
+            image_box,
+            (x_node, y_node),
+            xybox=(thumb_x, thumb_y),
+            xycoords="data",
+            boxcoords="data",
+            frameon=True,
+            pad=0.15,
+            bboxprops={"edgecolor": "#111111", "linewidth": 0.8},
+            arrowprops={
+                "arrowstyle": "-",
+                "color": connector_color,
+                "alpha": connector_alpha,
+                "linewidth": connector_linewidth,
+            },
+        )
+        ax.add_artist(annotation)
+
+        if label_points:
+            ax.text(
+                x_node,
+                y_node,
+                f"S{i}",
+                fontsize=8,
+                color="#111111",
+                ha="center",
+                va="bottom",
+                zorder=15,
+            )
+
+    # Expand top view so thumbnails are visible.
+    ax.set_ylim(y_min, y_max + (top_margin_ratio + 0.22) * y_span)
+
+    if save_path is not None:
+        ax.figure.savefig(save_path, dpi=save_dpi, bbox_inches="tight")
+
+    return ax
